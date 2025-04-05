@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Stream Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: white;
+        }
+        .video-container {
+            display: flex;
+            justify-content: center;
+            margin: 20px auto;
+            max-width: 1200px;
+        }
+        video {
+            width: 100%;
+            background: #000;
+            border: 1px solid #333;
+        }
+        .controls {
+            text-align: center;
+            margin: 20px;
+        }
+        button {
+            padding: 12px 24px;
+            margin: 0 10px;
+            cursor: pointer;
+            background: #4CAF50;
+            border: none;
+            color: white;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="video-container">
+        <video id="remoteVideo" autoplay playsinline controls></video>
+    </div>
+    <div class="controls">
+        <button id="watchButton">Connect to Stream</button>
+        <button id="stopButton" disabled>Disconnect</button>
+    </div>
+    <script>
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        let peerConnection;
+        let ws;
+        let streamId;
+
+        const remoteVideo = document.getElementById('remoteVideo');
+        const watchButton = document.getElementById('watchButton');
+        const stopButton = document.getElementById('stopButton');
+
+        watchButton.addEventListener('click', startWatching);
+        stopButton.addEventListener('click', stopWatching);
+
+        function setupWebSocket() {
+            ws = new WebSocket('ws://165.22.56.18:3333/app/testing');
+            
+            ws.onopen = () => {
+                console.log('Connected to signaling server');
+                // Request an offer once connected
+                ws.send(JSON.stringify({
+                    command: 'request_offer'
+                }));
+            };
+
+            ws.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+                console.log('received message:', message);
+                if (message.id && message.sdp) {
+                    streamId = message.id;
+                    await handleOffer(message);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket connection closed');
+                stopWatching();
+            };
+        }
+
+        async function startWatching() {
+            try {
+                watchButton.disabled = true;
+                stopButton.disabled = false;
+
+                peerConnection = new RTCPeerConnection(configuration);
+                
+                peerConnection.ontrack = (event) => {
+                    remoteVideo.srcObject = event.streams[0];
+                };
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        sendIceCandidate(event.candidate);
+                    }
+                };
+
+                setupWebSocket();
+            } catch (error) {
+                console.error('Error starting to watch:', error);
+                stopWatching();
+            }
+        }
+
+        async function handleOffer(message) {
+            try {
+                await peerConnection.setRemoteDescription(message.sdp);
+
+                // Add all received ICE candidates
+                if (message.candidates) {
+                    for (const candidate of message.candidates) {
+                        await peerConnection.addIceCandidate(candidate);
+                    }
+                }
+
+                // Create and set local answer
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                // Gather ICE candidates
+                const candidates = [];
+                await new Promise(resolve => {
+                    const checkComplete = () => {
+                        if (peerConnection.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    };
+                    
+                    checkComplete();
+                    peerConnection.onicegatheringstatechnage = checkComplete;
+                    setTimeout(resolve, 2000); // Timeout after 2 seconds
+                });
+
+                // Send answer with gathered candidates
+                ws.send(JSON.stringify({
+                    id: streamId,
+                    command: 'answer',
+                    sdp: peerConnection.localDescription,
+                    candidates: candidates
+                }));
+
+            } catch (error) {
+                console.error('Error handling offer:', error);
+                stopWatching();
+            }
+        }
+
+        function sendIceCandidate(candidate) {
+            if (streamId) {
+                ws.send(JSON.stringify({
+                    id: streamId,
+                    command: 'candidate',
+                    candidates: [candidate]
+                }));
+            }
+        }
+
+        function stopWatching() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (ws) {
+                ws.close();
+            }
+            if (remoteVideo.srcObject) {
+                remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+                remoteVideo.srcObject = null;
+            }
+            watchButton.disabled = false;
+            stopButton.disabled = true;
+            streamId = null;
+        }
+    </script>
+</body>
+</html>
